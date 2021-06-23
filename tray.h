@@ -1,15 +1,31 @@
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifndef TRAY_H
 #define TRAY_H
+
+#if defined(__APPLE__)
+#include <objc/objc-runtime.h>
+#include <limits.h>
+#endif
 
 struct tray_menu;
 
 struct tray {
-  char *icon;
+  #if defined(__linux__)
+  const char *icon = NULL;
+  #elif defined(__APPLE__)
+  id icon = NULL;
+  #elif defined(_WIN32)
+  HICON icon = NULL;
+  #endif
   struct tray_menu *menu;
 };
 
 struct tray_menu {
-  char *text;
+  const char *id;
+  const char *text;
   int disabled;
   int checked;
 
@@ -48,9 +64,11 @@ static GtkMenuShell *_tray_menu(struct tray_menu *m) {
         item = gtk_menu_item_new_with_label(m->text);
         gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
                                   GTK_WIDGET(_tray_menu(m->submenu)));
-      } else {
+      } else if(m->checked) {
         item = gtk_check_menu_item_new_with_label(m->text);
         gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), !!m->checked);
+      } else {
+        item = gtk_menu_item_new_with_label(m->text);
       }
       gtk_widget_set_sensitive(item, !m->disabled);
       if (m->cb != NULL) {
@@ -89,9 +107,6 @@ static void tray_update(struct tray *tray) {
 static void tray_exit() { loop_result = -1; }
 
 #elif defined(TRAY_APPKIT)
-
-#include <objc/objc-runtime.h>
-#include <limits.h>
 
 static id app;
 static id pool;
@@ -194,10 +209,7 @@ static int tray_loop(int blocking) {
 }
 
 static void tray_update(struct tray *tray) {
-  objc_msgSend(statusBarButton, sel_registerName("setImage:"), 
-    objc_msgSend((id)objc_getClass("NSImage"), sel_registerName("imageNamed:"), 
-      objc_msgSend((id)objc_getClass("NSString"), sel_registerName("stringWithUTF8String:"), tray->icon)));
-
+  objc_msgSend(statusBarButton, sel_registerName("setImage:"), tray->icon);
   objc_msgSend(statusItem, sel_registerName("setMenu:"), _tray_menu(tray->menu));
 }
 
@@ -208,53 +220,13 @@ static void tray_exit() { objc_msgSend(app, sel_registerName("terminate:"), app)
 
 #include <shellapi.h>
 
-#define WM_TRAY_CALLBACK_MESSAGE (WM_USER + 1)
-#define WC_TRAY_CLASS_NAME "TRAY"
+#define WM_TRAY_CALLBACK_MESSAGE (WM_USER + 2)
+#define WM_TRAY_PASS_MENU_REF (WM_USER + 1)
 #define ID_TRAY_FIRST 1000
 
-static WNDCLASSEX wc;
 static NOTIFYICONDATA nid;
 static HWND hwnd;
 static HMENU hmenu = NULL;
-
-static LRESULT CALLBACK _tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam,
-                                       LPARAM lparam) {
-  switch (msg) {
-  case WM_CLOSE:
-    DestroyWindow(hwnd);
-    return 0;
-  case WM_DESTROY:
-    PostQuitMessage(0);
-    return 0;
-  case WM_TRAY_CALLBACK_MESSAGE:
-    if (lparam == WM_LBUTTONUP || lparam == WM_RBUTTONUP) {
-      POINT p;
-      GetCursorPos(&p);
-      SetForegroundWindow(hwnd);
-      WORD cmd = TrackPopupMenu(hmenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON |
-                                           TPM_RETURNCMD | TPM_NONOTIFY,
-                                p.x, p.y, 0, hwnd, NULL);
-      SendMessage(hwnd, WM_COMMAND, cmd, 0);
-      return 0;
-    }
-    break;
-  case WM_COMMAND:
-    if (wparam >= ID_TRAY_FIRST) {
-      MENUITEMINFO item = {
-          .cbSize = sizeof(MENUITEMINFO), .fMask = MIIM_ID | MIIM_DATA,
-      };
-      if (GetMenuItemInfo(hmenu, wparam, FALSE, &item)) {
-        struct tray_menu *menu = (struct tray_menu *)item.dwItemData;
-        if (menu != NULL && menu->cb != NULL) {
-          menu->cb(menu);
-        }
-      }
-      return 0;
-    }
-    break;
-  }
-  return DefWindowProc(hwnd, msg, wparam, lparam);
-}
 
 static HMENU _tray_menu(struct tray_menu *m, UINT *id) {
   HMENU hmenu = CreatePopupMenu();
@@ -279,7 +251,7 @@ static HMENU _tray_menu(struct tray_menu *m, UINT *id) {
         item.fState |= MFS_CHECKED;
       }
       item.wID = *id;
-      item.dwTypeData = m->text;
+      item.dwTypeData = (LPSTR)m->text;
       item.dwItemData = (ULONG_PTR)m;
 
       InsertMenuItem(hmenu, *id, TRUE, &item);
@@ -289,16 +261,8 @@ static HMENU _tray_menu(struct tray_menu *m, UINT *id) {
 }
 
 static int tray_init(struct tray *tray) {
-  memset(&wc, 0, sizeof(wc));
-  wc.cbSize = sizeof(WNDCLASSEX);
-  wc.lpfnWndProc = _tray_wnd_proc;
-  wc.hInstance = GetModuleHandle(NULL);
-  wc.lpszClassName = WC_TRAY_CLASS_NAME;
-  if (!RegisterClassEx(&wc)) {
-    return -1;
-  }
 
-  hwnd = CreateWindowEx(0, WC_TRAY_CLASS_NAME, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  hwnd = FindWindow("Neutralinojs_webview", NULL);
   if (hwnd == NULL) {
     return -1;
   }
@@ -311,8 +275,7 @@ static int tray_init(struct tray *tray) {
   nid.uFlags = NIF_ICON | NIF_MESSAGE;
   nid.uCallbackMessage = WM_TRAY_CALLBACK_MESSAGE;
   Shell_NotifyIcon(NIM_ADD, &nid);
-
-  tray_update(tray);
+  tray_update(tray); 
   return 0;
 }
 
@@ -335,13 +298,14 @@ static void tray_update(struct tray *tray) {
   HMENU prevmenu = hmenu;
   UINT id = ID_TRAY_FIRST;
   hmenu = _tray_menu(tray->menu, &id);
+  // Send menu ref to webview's Window event listener,
+  // because WM_TRAY_CALLBACK_MESSAGE needs it
+  SendMessage(hwnd, WM_TRAY_PASS_MENU_REF, (WPARAM)hmenu, 0);
   SendMessage(hwnd, WM_INITMENUPOPUP, (WPARAM)hmenu, 0);
-  HICON icon;
-  ExtractIconEx(tray->icon, 0, NULL, &icon, 1);
   if (nid.hIcon) {
     DestroyIcon(nid.hIcon);
   }
-  nid.hIcon = icon;
+  nid.hIcon = tray->icon;
   Shell_NotifyIcon(NIM_MODIFY, &nid);
 
   if (prevmenu != NULL) {
@@ -349,7 +313,7 @@ static void tray_update(struct tray *tray) {
   }
 }
 
-static void tray_exit() {
+static void tray_exit(HMENU hmenu) {
   Shell_NotifyIcon(NIM_DELETE, &nid);
   if (nid.hIcon != 0) {
     DestroyIcon(nid.hIcon);
@@ -358,13 +322,12 @@ static void tray_exit() {
     DestroyMenu(hmenu);
   }
   PostQuitMessage(0);
-  UnregisterClass(WC_TRAY_CLASS_NAME, GetModuleHandle(NULL));
 }
 #else
-static int tray_init(struct tray *tray) { return -1; }
-static int tray_loop(int blocking) { return -1; }
-static void tray_update(struct tray *tray) {}
-static void tray_exit();
+#error Please define TRAY_WINAPI, TRAY_APPINDICATOR or TRAY_APPKIT before including this file.
 #endif
 
 #endif /* TRAY_H */
+#ifdef __cplusplus
+}
+#endif
